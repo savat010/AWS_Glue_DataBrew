@@ -1,0 +1,475 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  SolutionS3BucketNameSuffix:
+    Type: String
+    Description: "Suffix for S3 bucket to be created for storing the solution data files and script file. S3 bucket names needs to be unique globally - please use a suffix that would make the bucket name unique."
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9_-]*"
+    Default: "data-script-store"
+  PathParameter:
+    Description: "Path Parameter for AWS Glue DataBrew dataset to filter data files."
+    Type: String
+    Default: "dateFilter"
+  SourceS3Bucket:
+    Description: "!Please do not change. Source Bucket in AWS blogteam account from where the demo data and script files will be copied."
+    Type: String
+    Default: 'aws-bigdata-blog'
+  SourceS3BasePrefix:
+    Description: "!Please do not change. Source path in AWS blogteam account from where the demo data and script files will be copied."
+    Type: String
+    Default: 'artifacts/databrew-bdb-1392-artifacts/'    
+  DataS3Keys:
+    Description: "S3 keys that will be copied"
+    Type: String
+    Default: 'source/citibike/2021-02/JC-202102-citibike-tripdata.csv, source/citibike/2021-03/JC-202103-citibike-tripdata.csv'
+  GlueETLJobFileKey:
+    Description: "Key of the Glue ETL Job file"  
+    Type: String
+    Default: "scripts/glue-etl-jobs/databrew-glue-etl-job.py"
+
+Resources:
+  SolutionS3Bucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-${SolutionS3BucketNameSuffix}'
+
+  GlueDataBrewAndETLPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${AWS::StackName}-Glue-DataBrew-ETL-job-policy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "s3:GetObject"
+              - "s3:PutObject"
+              - "s3:DeleteObject"
+              - "s3:ListBucket"
+            Resource:
+              - !GetAtt SolutionS3Bucket.Arn
+              - !Join
+                  - ""
+                  - - "arn:aws:s3:::"
+                    - !Ref SolutionS3Bucket
+                    - "/*"
+          - Effect: Allow
+            Action:
+              - "logs:CreateLogGroup"
+              - "logs:CreateLogStream"
+              - "logs:PutLogEvents"              
+            Resource:
+              - "arn:aws:logs:*:*:log-group:/aws-glue/jobs/*"              
+
+  GlueDataBrewAndETLRole:
+    Type: AWS::IAM::Role
+    DependsOn: GlueDataBrewAndETLPolicy
+    Properties:
+      Path: "/service-role/"
+      AssumeRolePolicyDocument: "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":[\"databrew.amazonaws.com\", \"glue.amazonaws.com\"]},\"Action\":\"sts:AssumeRole\"}]}"
+      MaxSessionDuration: 3600
+      ManagedPolicyArns:
+        - !Ref GlueDataBrewAndETLPolicy
+        - "arn:aws:iam::aws:policy/service-role/AWSGlueDataBrewServiceRole"
+      RoleName: !Sub ${AWS::StackName}-GlueDataBrewAndETLRole   
+   
+  S3CustomResource:
+    Type: Custom::S3CustomResource
+    Properties:
+      ServiceToken: !GetAtt LambdaFunction.Arn
+      source_bucket: !Ref SourceS3Bucket
+      source_s3_prefix: !Ref SourceS3BasePrefix
+      source_keys:  !Join 
+            - ","
+            - - !Ref DataS3Keys
+              - !Ref GlueETLJobFileKey      
+      target_bucket: !Ref SolutionS3Bucket
+
+  LambdaFunction:
+     Type: "AWS::Lambda::Function"
+     Properties:
+       Description: "Copies source files and script files into source folder of solution S3 Buckets!"
+       FunctionName: !Sub '${AWS::StackName}-content-copy-lambda'
+       Handler: index.handler
+       Role: !GetAtt LambdaExecutionRole.Arn
+       Timeout: 360
+       Runtime: python3.8
+       Code:
+         ZipFile: |
+          import boto3
+          import cfnresponse
+          def handler(event, context):
+            # Init ...
+            print(event)
+            the_event = event['RequestType']
+            print("The event is: ", str(the_event))
+            response_data = {}
+            s3 = boto3.resource('s3')
+            # Retrieve parameters
+            source_bucket = event['ResourceProperties']['source_bucket']
+            source_s3_prefix = event['ResourceProperties']['source_s3_prefix']
+            source_keys = event['ResourceProperties']['source_keys']
+            source_key_list = [k.strip() for k in source_keys.split(',')]            
+            target_bucket = event['ResourceProperties']['target_bucket']
+            try:
+                if the_event in ('Create', 'Update'):
+                    print("copy files")
+                    src_bucket_obj = s3.Bucket(source_bucket)
+                    for key in source_key_list:
+                      source_key = f'{source_s3_prefix}/{key}'.replace('//','/')
+                      s3.meta.client.copy_object(
+                          Bucket=target_bucket,
+                          CopySource={'Bucket': source_bucket, 'Key': source_key},
+                          Key=key
+                      )
+                elif the_event == 'Delete':
+                    print("Deleting S3 content...")
+                    b_operator = boto3.resource('s3')
+                    b_operator.Bucket(str(target_bucket)).objects.all().delete()
+                # Everything OK... send the signal back
+                print("Execution succesfull!")
+                cfnresponse.send(event,
+                                context,
+                                cfnresponse.SUCCESS,
+                                response_data)
+            except Exception as e:
+                print("Execution failed...")
+                print(str(e))
+                response_data['Data'] = str(e)
+                cfnresponse.send(event,
+                                context,
+                                cfnresponse.FAILED,
+                                response_data)
+    
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+        Version: '2012-10-17'
+      Path: "/"
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource: arn:aws:logs:*:*:*
+          Version: '2012-10-17'
+        PolicyName: !Sub ${AWS::StackName}-${AWS::Region}-AWSLambda-CW
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - s3:PutObject
+            - s3:DeleteObject
+            - s3:Get*
+            - s3:List*
+            Effect: Allow
+            Resource:
+            - !Sub arn:aws:s3:::${SourceS3Bucket}/*
+            - !Sub arn:aws:s3:::${SourceS3Bucket}
+            - !Sub arn:aws:s3:::${SolutionS3Bucket}/*
+            - !Sub arn:aws:s3:::${SolutionS3Bucket}
+          Version: '2012-10-17'
+        PolicyName: !Sub ${AWS::StackName}-${AWS::Region}-AWSLambda-S3
+      RoleName: !Sub ${AWS::StackName}-LambdaExecutionRole   
+
+  DatabrewDataset:
+    Type: AWS::DataBrew::Dataset
+    Properties: 
+      Name: !Sub '${AWS::StackName}-dataset'
+      Format: 
+        'CSV'
+      FormatOptions: 
+        Csv:
+          Delimiter: ','
+          HeaderRow: Yes
+      Input: 
+        S3InputDefinition: 
+          Bucket: !Ref SolutionS3Bucket
+          Key: !Sub 'source/citibike/{${PathParameter}}/'
+      PathOptions: 
+        Parameters:
+        - DatasetParameter: 
+            Name: !Ref PathParameter
+            Type: String
+          PathParameterName: !Ref PathParameter
+
+  DataBrewRecipes:
+    Type: AWS::DataBrew::Recipe
+    Properties: 
+      Description: String
+      Name: !Sub '${AWS::StackName}-recipe'
+      Steps: 
+          - Action:
+              Operation: REMOVE_VALUES
+              Parameters:
+                SourceColumn: starttime
+            ConditionExpressions:
+            - Condition: IS_MISSING
+              TargetColumn: starttime
+              Value: string
+          - Action:
+              Operation: REMOVE_VALUES
+              Parameters:
+                SourceColumn: stoptime
+            ConditionExpressions:
+            - Condition: IS_MISSING
+              TargetColumn: stoptime
+              Value: string
+          - Action:
+              Operation: REMOVE_VALUES
+              Parameters:
+                SourceColumn: gender
+            ConditionExpressions:
+            - Condition: LESS_THAN_EQUAL
+              TargetColumn: gender
+              Value: '0'
+
+
+  DataBrewProject:
+    DependsOn:
+      - S3CustomResource
+    Type: AWS::DataBrew::Project
+    Properties: 
+      Name: !Sub '${AWS::StackName}-project'
+      DatasetName: !Ref DatabrewDataset
+      RecipeName: !Ref DataBrewRecipes
+      RoleArn: !GetAtt GlueDataBrewAndETLRole.Arn
+      Sample:
+        Size: 500
+        Type: FIRST_N
+
+  DataBrewJob:
+    Type: AWS::DataBrew::Job
+    Properties:
+      Name: !Sub '${AWS::StackName}-job'
+      Type: RECIPE
+      ProjectName: !Ref DataBrewProject
+      RoleArn: !GetAtt GlueDataBrewAndETLRole.Arn
+      LogSubscription: ENABLE
+      MaxCapacity: 2
+      MaxRetries: 0
+      Outputs:
+        - CompressionFormat: GZIP
+          Format: CSV
+          Location:
+            Bucket: !Ref SolutionS3Bucket
+            Key: !Sub 'cleaned/citibike/'
+          Overwrite: true
+          PartitionColumns: []
+      
+  GlueETLJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Role: !Ref GlueDataBrewAndETLRole
+      Name: !Sub '${AWS::StackName}-${AWS::Region}-glue-etl-job'
+      GlueVersion: 2.0
+      Command: 
+        Name : "glueetl"
+        ScriptLocation: !Sub "s3://${SolutionS3Bucket}/${GlueETLJobFileKey}"
+      DefaultArguments: 
+        "--input_path": !Sub "s3://${SolutionS3Bucket}/cleaned/citibike/"
+        "--output_bucket": !Sub "${SolutionS3Bucket}"
+        "--s3_output_key": !Sub "processed/citibike/"
+      MaxRetries: 0
+      Description: "Process data."
+      AllocatedCapacity: 3
+
+
+  StepFunctionExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - states.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Policies:
+        -
+          PolicyName: "StatesExecutionPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action: ["glue:*"]
+                Resource: "*"
+              -
+                Effect: "Allow"
+                Action: ["databrew:*"]
+                Resource: "*"  
+      Path: "/" 
+      RoleName: !Sub ${AWS::StackName}-StepFunctionExecutionRole
+
+  StepFunctionStateMachin:
+    Type: "AWS::StepFunctions::StateMachine"
+    Properties:
+      StateMachineName: DataBrewGlueJobOrchestrator
+      DefinitionString:
+        Fn::Sub:
+        - |-
+            {
+              "Comment": "A Step Function Orchstrating a DataBrew and Glue ETL Job",
+              "StartAt": "DataBrewStep",
+              "States": {
+                "DataBrewStep": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::databrew:startJobRun.sync",
+                  "Parameters": {
+                    "Name": "${DataBrewJob}"
+                  },
+                  "ResultPath": "$.taskresult",
+                  "Next": "GlueStep"
+                },
+                "GlueStep": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::glue:startJobRun.sync",
+                  "Parameters": {
+                    "JobName": "${GlueETLJob}",
+                    "Arguments" : {
+                        "--input_path": "s3://${SolutionS3Bucket}/cleaned/citibike/",
+                        "--output_bucket" : "${SolutionS3Bucket}",
+                        "--s3_output_key" : "processed/citibike/"
+                    }
+                  },
+                  "End": true
+                }
+              }
+            }
+        - {
+          GlueETLJob: !Ref GlueETLJob,
+          DataBrewJob: !Ref DataBrewJob,
+          SolutionS3Bucket: !Ref SolutionS3Bucket
+        }
+      RoleArn: !GetAtt StepFunctionExecutionRole.Arn
+
+  GlueCrawlersRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - glue.amazonaws.com
+          Action:
+            - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: AthenaAccess
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Action: athena:*
+              Resource: '*'
+      - PolicyName: GlueS3Access
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Action:
+                - glue:*
+                - iam:ListRolePolicies
+                - iam:GetRole
+                - iam:GetRolePolicy
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - s3:GetBucketLocation
+                - s3:ListBucket
+                - s3:ListAllMyBuckets
+                - s3:GetBucketAcl
+                - s3:GetObject
+              Resource: 
+                - !Sub 'arn:aws:s3:::${SolutionS3Bucket}/*'
+                - !Sub 'arn:aws:s3:::${SolutionS3Bucket}'
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource:
+                - 'arn:aws:s3:::crawler-public*'
+                - 'arn:aws:s3:::aws-glue-*'
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: 'arn:aws:logs:*:*:/aws-glue/*'
+      RoleName: !Sub ${AWS::StackName}-GlueCrawlersRole
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      DatabaseInput:
+        Description: 'Citibike database'
+        Name: 'citibike'
+      CatalogId: !Ref AWS::AccountId
+
+  GlueCrawlerSourceData:
+    DependsOn:
+      - GlueDatabase
+      - GlueCrawlersRole
+    Type: AWS::Glue::Crawler
+    Properties:
+      Role:
+        Fn::GetAtt: [ GlueCrawlersRole, Arn ]
+      Description: 'Citibike Source Data Crawler'
+      Schedule:
+        # Run crawler every day every 6 hours Monday to Friday
+        ScheduleExpression: 'cron(0 0/1 ? * MON-FRI *)'
+      DatabaseName: !Ref GlueDatabase
+      Targets:
+        S3Targets:
+          - Path:  !Sub '${SolutionS3Bucket}/source/citibike/'
+      TablePrefix: 'source_'
+      Name: !Sub '${AWS::StackName}-source-data-crawler'
+
+  GlueCrawlerCleanedData:
+    DependsOn:
+      - GlueDatabase
+      - GlueCrawlersRole
+    Type: AWS::Glue::Crawler
+    Properties:
+      Role:
+        Fn::GetAtt: [ GlueCrawlersRole, Arn ]
+      Description: 'Citibike Cleaned Data Crawler'
+      Schedule:
+        # Run crawler every day every 6 hours Monday to Friday
+        ScheduleExpression: 'cron(0 0/1 ? * MON-FRI *)'
+      DatabaseName: !Ref GlueDatabase
+      Targets:
+        S3Targets:
+          - Path:  !Sub '${SolutionS3Bucket}/cleaned/citibike/'
+      TablePrefix: 'cleaned_'
+      Name: !Sub '${AWS::StackName}-cleaned-data-crawler'
+
+  GlueCrawlerProcessedData:
+    DependsOn:
+      - GlueDatabase
+      - GlueCrawlersRole
+    Type: AWS::Glue::Crawler
+    Properties:
+      Role:
+        Fn::GetAtt: [ GlueCrawlersRole, Arn ]
+      Description: 'Citibike Processed Data Crawler'
+      Schedule:
+        # Run crawler every day every 6 hours Monday to Friday
+        ScheduleExpression: 'cron(0 0/1 ? * MON-FRI *)'
+      DatabaseName: !Ref GlueDatabase
+      Targets:
+        S3Targets:
+          - Path:  !Sub '${SolutionS3Bucket}/processed/citibike/'
+      TablePrefix: 'processed_'
+      Name: !Sub '${AWS::StackName}-processed-data-crawler'
