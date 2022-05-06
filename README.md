@@ -44,7 +44,7 @@ DataBrew provides the ability to prepare and transform your dataset using over 2
 ![5](https://user-images.githubusercontent.com/15683958/167124323-1d0d1c40-e1d6-43f8-9ce1-d7d5f13c3809.png)
 
 
-## Some of the transformations you can do using DataVrew:
+## Some of the transformations you can do using DataBrew:
 1. **Combine datasets** – You can combine datasets in the following ways:
 2. **Join** – Combine several datasets by joining them with other datasets using a join type like inner join, outer join, or excluding join.
 3. **Union operation** – Combine several datasets using a union operation. Multiple files for input datasets – While creating a dataset, you can use a parameterized Amazon S3 path or a dynamic parameter and select multiple files.
