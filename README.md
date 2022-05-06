@@ -4,6 +4,14 @@ AWS Glue DataBrew is a new visual data preparation tool that makes it easy for d
  
 You can automate filtering anomalies, converting data to standard formats, and correcting invalid values, and other tasks. After your data is ready, you can immediately use it for analytics and machine learning projects. Furthermore, you only pay for what you use - no upfront commitment.
  
+Some of it's key features are:-
+1. **Over 250 transformations**: Visualize, clean, and normalize data directly from your data lake, data warehouses, and database including Amazon S3, Amazon Redshift, Amazon Aurora, and Amazon RDS
+
+2. **Evaluate data quality**: Evaluate the quality of your data by profiling it to understand data patterns and detect anomalies
+
+3. **Visually map data lineage**: Visually map the lineage of your data to understand the various data sources and transformation steps that the data has been through
+
+4. **Automate at scale**: Automate data cleaning and normalization tasks by applying saved transformation directly to new data as it comes into your source system
 
 ## Use Case 1: Enrich datasets for descriptive analytics with AWS Glue DataBrew
 
